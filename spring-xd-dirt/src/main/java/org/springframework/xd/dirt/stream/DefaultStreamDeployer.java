@@ -33,7 +33,7 @@ import org.springframework.xd.dirt.module.ModuleDeploymentRequest;
  */
 public class DefaultStreamDeployer implements StreamDeployer {
 
-	private final StreamParser streamParser = new DefaultStreamParser();
+	private final StreamParser streamParser = new EnhancedStreamParser(); // new DefaultStreamParser();
 
 	private final MessageChannel outputChannel;
 
