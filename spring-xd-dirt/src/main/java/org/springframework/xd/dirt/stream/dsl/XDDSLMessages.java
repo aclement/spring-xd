@@ -98,5 +98,4 @@ public enum XDDSLMessages {
 	public static enum Kind {
 		INFO, WARNING, ERROR
 	}
-
 }

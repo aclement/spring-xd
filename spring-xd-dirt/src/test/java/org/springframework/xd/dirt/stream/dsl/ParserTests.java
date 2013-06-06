@@ -217,7 +217,6 @@ public class ParserTests {
 		Properties props = mn.getArgumentsAsProperties();
 		assertEquals("new Foo()",props.get("expression"));
 	}
-	
 
 	// ---
 	

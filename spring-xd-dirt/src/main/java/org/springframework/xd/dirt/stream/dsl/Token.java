@@ -21,7 +21,7 @@ package org.springframework.xd.dirt.stream.dsl;
  *
  * @author Andy Clement
  */
-class Token {
+class Token { 
 
 	TokenKind kind; // the kind of token
 	String data;    // any extra data for this token instance, e.g. the text for an identifier token

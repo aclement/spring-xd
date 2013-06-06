@@ -1,0 +1,1925 @@
+From e321942faca34c0cdbfacc182360cdac64cdfb66 Mon Sep 17 00:00:00 2001
+From: Andy Clement <andrew.clement@gmail.com>
+Date: Tue, 4 Jun 2013 16:01:15 -0700
+Subject: [PATCH] XD-196: change to alternative parser implementation
+
+---
+ .../xd/dirt/stream/DefaultStreamDeployer.java      |   2 +-
+ .../xd/dirt/stream/EnhancedStreamParser.java       |  59 ++++
+ .../xd/dirt/stream/dsl/DSLParseException.java      |  80 ++++++
+ .../xd/dirt/stream/dsl/InternalParseException.java |  38 +++
+ .../xd/dirt/stream/dsl/StreamConfigParser.java     | 241 ++++++++++++++++
+ .../springframework/xd/dirt/stream/dsl/Token.java  |  92 +++++++
+ .../xd/dirt/stream/dsl/TokenKind.java              |  57 ++++
+ .../xd/dirt/stream/dsl/Tokenizer.java              | 304 +++++++++++++++++++++
+ .../xd/dirt/stream/dsl/XDDSLMessages.java          | 102 +++++++
+ .../xd/dirt/stream/dsl/ast/ArgumentNode.java       |  47 ++++
+ .../xd/dirt/stream/dsl/ast/AstNode.java            |  45 +++
+ .../xd/dirt/stream/dsl/ast/ModuleNode.java         |  78 ++++++
+ .../xd/dirt/stream/dsl/ast/StreamNode.java         |  74 +++++
+ .../xd/dirt/stream/dsl/ast/StreamsNode.java        |  81 ++++++
+ .../xd/dirt/stream/EnhancedStreamParserTests.java  |  79 ++++++
+ .../xd/dirt/stream/dsl/ParserTests.java            | 234 ++++++++++++++++
+ .../xd/dirt/stream/dsl/TokenizerTests.java         | 157 +++++++++++
+ 17 files changed, 1769 insertions(+), 1 deletion(-)
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/EnhancedStreamParser.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/DSLParseException.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/InternalParseException.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/StreamConfigParser.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Token.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/TokenKind.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Tokenizer.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/XDDSLMessages.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ArgumentNode.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/AstNode.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ModuleNode.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamNode.java
+ create mode 100644 spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamsNode.java
+ create mode 100644 spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/EnhancedStreamParserTests.java
+ create mode 100644 spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/ParserTests.java
+ create mode 100644 spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/TokenizerTests.java
+
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/DefaultStreamDeployer.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/DefaultStreamDeployer.java
+index 64d01d0..b4c8ce3 100644
+--- a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/DefaultStreamDeployer.java
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/DefaultStreamDeployer.java
+@@ -33,7 +33,7 @@ import org.springframework.xd.dirt.module.ModuleDeploymentRequest;
+  */
+ public class DefaultStreamDeployer implements StreamDeployer {
+ 
+-	private final StreamParser streamParser = new DefaultStreamParser();
++	private final StreamParser streamParser = new EnhancedStreamParser(); // new DefaultStreamParser();
+ 
+ 	private final MessageChannel outputChannel;
+ 
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/EnhancedStreamParser.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/EnhancedStreamParser.java
+new file mode 100644
+index 0000000..de86352
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/EnhancedStreamParser.java
+@@ -0,0 +1,59 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.springframework.xd.dirt.module.ModuleDeploymentRequest;
++import org.springframework.xd.dirt.stream.dsl.StreamConfigParser;
++import org.springframework.xd.dirt.stream.dsl.ast.ArgumentNode;
++import org.springframework.xd.dirt.stream.dsl.ast.ModuleNode;
++import org.springframework.xd.dirt.stream.dsl.ast.StreamsNode;
++
++/**
++ * @author Andy Clement
++ */
++public class EnhancedStreamParser implements StreamParser {
++
++	@Override
++	public List<ModuleDeploymentRequest> parse(String name, String config) {
++
++		StreamConfigParser parser = new StreamConfigParser();
++		StreamsNode ast = parser.parse(config);
++		List<ModuleDeploymentRequest> requests = new ArrayList<ModuleDeploymentRequest>();
++
++		List<ModuleNode> moduleNodes = ast.getModuleNodes();
++		for (int m=moduleNodes.size()-1;m>=0;m--) {
++			ModuleNode moduleNode = moduleNodes.get(m);
++			ModuleDeploymentRequest request = new ModuleDeploymentRequest();
++			request.setGroup(name);
++			request.setType((m == 0) ? "source" : (m == moduleNodes.size() - 1) ? "sink" : "processor");
++			request.setModule(moduleNode.getName());
++			request.setIndex(m);
++			if (moduleNode.hasArguments()) {
++				ArgumentNode[] arguments = moduleNode.getArguments();
++				for (int a=0;a<arguments.length;a++) {
++					request.setParameter(arguments[a].getName(),arguments[a].getValue());
++				}
++			}
++			requests.add(request);
++		}
++		return requests;
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/DSLParseException.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/DSLParseException.java
+new file mode 100644
+index 0000000..8b78452
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/DSLParseException.java
+@@ -0,0 +1,80 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++import org.springframework.expression.ParseException;
++
++/**
++ * Root exception for DSL parsing related exceptions. Rather than holding a hard coded string indicating the problem, it
++ * records a message key and the inserts for the message. See {@link XDDSLMessages} for the list of all possible messages
++ * that can occur.
++ *
++ * @author Andy Clement
++ */
++@SuppressWarnings("serial")
++public class DSLParseException extends ParseException {
++
++	private XDDSLMessages message;
++	private Object[] inserts;
++
++	public DSLParseException(String expressionString, int position, XDDSLMessages message, Object... inserts) {
++		super(expressionString, position, message.formatMessage(position,inserts));
++		this.position = position;
++		this.message = message;
++		this.inserts = inserts;
++	}
++
++	public DSLParseException(int position, XDDSLMessages message, Object... inserts) {
++		super(position, message.formatMessage(position,inserts));
++		this.position = position;
++		this.message = message;
++		this.inserts = inserts;
++	}
++
++	public DSLParseException(int position, Throwable cause, XDDSLMessages message, Object... inserts) {
++		super(position, message.formatMessage(position,inserts), cause);
++		this.position = position;
++		this.message = message;
++		this.inserts = inserts;
++	}
++
++	/**
++	 * @return a formatted message with inserts applied
++	 */
++	@Override
++	public String getMessage() {
++		if (message != null)
++			return message.formatMessage(position, inserts);
++		else
++			return super.getMessage();
++	}
++
++	/**
++	 * @return the message code
++	 */
++	public XDDSLMessages getMessageCode() {
++		return this.message;
++	}
++
++	/**
++	 * @return the message inserts
++	 */
++	public Object[] getInserts() {
++		return inserts;
++	}
++
++}
+\ No newline at end of file
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/InternalParseException.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/InternalParseException.java
+new file mode 100644
+index 0000000..99e3b8d
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/InternalParseException.java
+@@ -0,0 +1,38 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++/**
++ * Wraps a real parse exception. This exception flows to the top parse method and then
++ * the wrapped exception is thrown as the real problem.
++ *
++ * @author Andy Clement
++ * @since 3.0
++ */
++@SuppressWarnings("serial")
++public class InternalParseException extends RuntimeException {
++
++	public InternalParseException(DSLParseException cause) {
++		super(cause);
++	}
++
++	@Override
++	public DSLParseException getCause() {
++		return (DSLParseException) super.getCause();
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/StreamConfigParser.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/StreamConfigParser.java
+new file mode 100644
+index 0000000..ac9dbf5
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/StreamConfigParser.java
+@@ -0,0 +1,241 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.springframework.xd.dirt.stream.dsl.ast.ArgumentNode;
++import org.springframework.xd.dirt.stream.dsl.ast.ModuleNode;
++import org.springframework.xd.dirt.stream.dsl.ast.StreamNode;
++import org.springframework.xd.dirt.stream.dsl.ast.StreamsNode;
++
++// TODO [Andy] more flexible than we need right now, fix that up as DSL settles down
++/**
++ * @author Andy Clement
++ */
++public class StreamConfigParser {
++	
++	private String expressionString;
++	private List<Token> tokenStream;
++	private int tokenStreamLength;
++	private int tokenStreamPointer; // Current location in the token stream when processing tokens
++
++	public StreamsNode parse(String stream) {
++		try {
++			this.expressionString = stream;
++			Tokenizer tokenizer = new Tokenizer(expressionString);
++			tokenStream = tokenizer.getTokens();
++			tokenStreamLength = tokenStream.size();
++			tokenStreamPointer = 0;
++			StreamsNode ast = eatStreams();
++			if (moreTokens()) {
++				throw new DSLParseException(peekToken().startpos,XDDSLMessages.MORE_INPUT,toString(nextToken()));
++			}
++			return ast;
++		} catch (InternalParseException ipe) {
++			throw ipe.getCause();
++		}
++	}
++	
++	// streams: name = stream ([;\n] stream)*
++	private StreamsNode eatStreams() {
++		List<StreamNode> streamNodes = new ArrayList<StreamNode>();
++		streamNodes.add(eatStream());
++		while (peekToken(TokenKind.NEWLINE,TokenKind.SEMICOLON)) {
++			nextToken();
++			streamNodes.add(eatStream());
++		}
++		return new StreamsNode(this.expressionString, streamNodes);
++	}
++	
++	// stream: name = module (| module)*
++	private StreamNode eatStream() {
++		List<ModuleNode> moduleNodes= new ArrayList<ModuleNode>();
++		String streamName = null;
++		// Is the stream named?
++		if (lookAhead(1,TokenKind.EQUALS)) {
++			if (peekToken(TokenKind.IDENTIFIER)) {
++				streamName = eatToken(TokenKind.IDENTIFIER).data;
++				nextToken(); // skip '='
++			} else {
++				// TODO [Andy] error: not a name we can use to name the stream
++			}			
++		}
++		moduleNodes.add(eatModule());
++		while (moreTokens()) {
++			Token t = peekToken();
++			if (t.kind == TokenKind.PIPE) {
++				nextToken();
++				moduleNodes.add(eatModule());
++			} else if (t.kind == TokenKind.NEWLINE || t.kind == TokenKind.SEMICOLON) {
++				// end of this stream
++				break;
++			} else {
++				raiseInternalException(t.startpos,XDDSLMessages.UNEXPECTED_DATA_AFTER_MODULE,toString(peekToken()));
++			}
++		}
++		StreamNode streamNode= new StreamNode(streamName, moduleNodes);
++		return streamNode;
++	}
++	
++	// TODO [Andy] temporary to support horrid tap @ syntax
++	boolean isTap = false;
++	
++	// module: identifier (moduleArguments)*
++	private ModuleNode eatModule() {
++		Token moduleName = eatToken(TokenKind.IDENTIFIER);
++		isTap = (moduleName.data.equals("tap"));
++		ArgumentNode[] args = maybeEatModuleArgs();
++		return new ModuleNode(moduleName.data, moduleName.startpos, moduleName.endpos, args);
++	}
++	
++	// moduleArguments : DOUBLE_MINUS identifier(name) EQUALS identifier(value)	
++	private ArgumentNode[] maybeEatModuleArgs() {
++		List<ArgumentNode> args = null;
++		while (peekToken(TokenKind.DOUBLE_MINUS,TokenKind.REFERENCE)) {
++			Token optionQualifier = nextToken(); // skip the '--' (or '@' at the moment...)
++			if (isTap) {
++				Token t = peekToken();
++				String argValue = eatArgValue(t);
++				nextToken();
++				if (args == null) {
++					args = new ArrayList<ArgumentNode>();
++				}
++				args.add(new ArgumentNode("channel", argValue+".0", optionQualifier.startpos, t.endpos));
++				continue;
++			}
++			if (peekToken(TokenKind.IDENTIFIER) && !isNextTokenAdjacent()) {
++				raiseInternalException(peekToken().startpos, XDDSLMessages.NO_WHITESPACE_BEFORE_ARG_NAME);
++			}
++			Token argName = eatToken(TokenKind.IDENTIFIER);
++			if (peekToken(TokenKind.EQUALS) && !isNextTokenAdjacent()) {
++				raiseInternalException(peekToken().startpos, XDDSLMessages.NO_WHITESPACE_BEFORE_ARG_EQUALS);
++			}
++			eatToken(TokenKind.EQUALS);
++			if (peekToken(TokenKind.IDENTIFIER) && !isNextTokenAdjacent()) {
++				raiseInternalException(peekToken().startpos, XDDSLMessages.NO_WHITESPACE_BEFORE_ARG_VALUE);
++			}
++			// Process argument value:
++			Token t = peekToken();
++			String argValue = eatArgValue(t);
++			nextToken();
++			if (args == null) {
++				args = new ArrayList<ArgumentNode>();
++			}
++			args.add(new ArgumentNode(argName.data, argValue, argName.startpos-2, t.endpos));
++		}
++		return args==null?null:args.toArray(new ArgumentNode[args.size()]);
++	}
++
++	// argValue: identifier | literal_string
++	private String eatArgValue(Token t) {
++		String argValue = null;
++		if (t.getKind()==TokenKind.IDENTIFIER) {
++			argValue = t.data;
++		} else if (t.getKind() == TokenKind.LITERAL_STRING) {
++			argValue = t.data.substring(1,t.data.length()-1).replaceAll("''", "'").replaceAll("\"\"", "\"");
++		} else {
++			raiseInternalException(t.startpos,XDDSLMessages.EXPECTED_ARGUMENT_VALUE,t.data);
++		}
++		return argValue;
++	}
++	
++	private Token eatToken(TokenKind expectedKind) {
++		Token t = nextToken();
++		if (t==null) {
++			raiseInternalException( expressionString.length(), XDDSLMessages.OOD);
++		}
++		if (t.kind!=expectedKind) {
++			raiseInternalException(t.startpos,XDDSLMessages.NOT_EXPECTED_TOKEN, expectedKind.toString().toLowerCase(),t.getKind().toString().toLowerCase());
++		}
++		return t;
++	}
++
++	private boolean peekToken(TokenKind desiredTokenKind) {
++		return peekToken(desiredTokenKind,false);
++	}
++
++	private boolean lookAhead(int distance,TokenKind desiredTokenKind) {
++		if ((tokenStreamPointer+distance)>=tokenStream.size()) {
++			return false;
++		}
++		Token t = tokenStream.get(tokenStreamPointer+distance);
++		if (t.kind==desiredTokenKind) {
++			return true;
++		}
++		return false;
++	}
++
++	private boolean peekToken(TokenKind desiredTokenKind1,TokenKind desiredTokenKind2) {
++		return peekToken(desiredTokenKind1,false) || peekToken(desiredTokenKind2,false);
++	}
++
++	private boolean peekToken(TokenKind desiredTokenKind, boolean consumeIfMatched) {
++		if (!moreTokens()) {
++			return false;
++		}
++		Token t = peekToken();
++		if (t.kind==desiredTokenKind) {
++			if (consumeIfMatched) {
++				tokenStreamPointer++;
++			}
++			return true;
++		} else {
++			return false;
++		}
++	}
++	
++	private boolean moreTokens() {
++		return tokenStreamPointer<tokenStream.size();
++	}
++
++	private Token nextToken() {
++		if (tokenStreamPointer>=tokenStreamLength) {
++			return null;
++		}
++		return tokenStream.get(tokenStreamPointer++);
++	}
++	
++	private boolean isNextTokenAdjacent() {
++		if (tokenStreamPointer>=tokenStreamLength) {
++			return false;
++		}
++		Token last = tokenStream.get(tokenStreamPointer-1);
++		Token next = tokenStream.get(tokenStreamPointer);
++		return next.startpos==last.endpos;
++	}
++
++	private Token peekToken() {
++		if (tokenStreamPointer>=tokenStreamLength) {
++			return null;
++		}
++		return tokenStream.get(tokenStreamPointer);
++	}
++
++	private void raiseInternalException(int pos, XDDSLMessages message,Object... inserts) {
++		throw new InternalParseException(new DSLParseException(expressionString,pos,message,inserts));
++	}
++
++	public String toString(Token t) {
++		if (t.getKind().hasPayload()) {
++			return t.stringValue();
++		} else {
++			return t.kind.toString().toLowerCase();
++		}
++	}
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Token.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Token.java
+new file mode 100644
+index 0000000..78c64fc
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Token.java
+@@ -0,0 +1,92 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++/**
++ * Holder for a kind of token, the associated data and its position in the input data stream (start/end).
++ *
++ * @author Andy Clement
++ */
++class Token {
++
++	TokenKind kind; // the kind of token
++	String data;    // any extra data for this token instance, e.g. the text for an identifier token
++	int startpos;   // index of first character
++	int endpos;     // index of char after the last character
++
++	/**
++	 * Constructor for use when there is no particular data for the token
++	 */
++	Token(TokenKind tokenKind, int startpos, int endpos) {
++		this.kind = tokenKind;
++		this.startpos = startpos;
++		this.endpos = endpos;
++	}
++
++	/**
++	 * Constructor for use when there is extra data to associate with a token.
++	 * For example the text for an identifier token.
++	 */
++	Token(TokenKind tokenKind, char[] tokenData, int pos, int endpos) {
++		this(tokenKind,pos,endpos);
++		this.data = new String(tokenData);
++	}
++
++
++	public TokenKind getKind() {
++		return kind;
++	}
++
++	@Override
++	public String toString() {
++		StringBuilder s = new StringBuilder();
++		s.append("[").append(kind.toString());
++		if (kind.hasPayload()) {
++			s.append(":").append(data);
++		}
++		s.append("]");
++		s.append("(").append(startpos).append(",").append(endpos).append(")");
++		return s.toString();
++	}
++
++	public boolean isIdentifier() {
++		return kind==TokenKind.IDENTIFIER;
++	}
++
++	public String stringValue() {
++		return data;
++	}
++	
++	public int hashCode() {
++		return this.kind.ordinal()*37+(this.startpos+this.endpos)*37+(this.kind.hasPayload()?this.data.hashCode():0);
++	}
++	
++	public boolean equals(Object o) {
++		if (!(o instanceof Token)) {
++			return false;
++		}
++		Token token = (Token)o;
++		boolean basicmatch = this.kind == token.kind && this.startpos == token.startpos && this.endpos == token.endpos;
++		if (!basicmatch) return false;
++		if (this.kind.hasPayload()) {
++			if (!this.data.equals(token.data)) {
++				return false;
++			}
++		}
++		return true;
++	}
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/TokenKind.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/TokenKind.java
+new file mode 100644
+index 0000000..a032be1
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/TokenKind.java
+@@ -0,0 +1,57 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++/**
++ * @author Andy Clement
++ */
++enum TokenKind {
++	IDENTIFIER,
++	DOUBLE_MINUS("--"),
++	EQUALS("="),
++	PIPE("|"),
++	NEWLINE("\n"),
++	SEMICOLON(";"),
++	REFERENCE("@"),
++	LITERAL_STRING
++	;
++
++	char[] tokenChars;
++	private boolean hasPayload; // is there more to this token than simply the kind
++
++	private TokenKind(String tokenString) {
++		tokenChars = tokenString.toCharArray();
++		hasPayload = tokenChars.length==0;
++	}
++
++	private TokenKind() {
++		this("");
++	}
++
++	@Override
++	public String toString() {
++		return this.name()+(tokenChars.length!=0?"("+new String(tokenChars)+")":"");
++	}
++
++	public boolean hasPayload() {
++		return hasPayload;
++	}
++
++	public int getLength() {
++		return tokenChars.length;
++	}
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Tokenizer.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Tokenizer.java
+new file mode 100644
+index 0000000..836e390
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/Tokenizer.java
+@@ -0,0 +1,304 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++import org.springframework.util.Assert;
++
++// TODO [Andy] more general than SpringXD requires, trim it down once the spec is more well defined
++/**
++ * Lex some input data into a stream of tokens that can then be parsed.
++ *
++ * @author Andy Clement
++ */
++class Tokenizer {
++
++	// The string to be tokenized
++	String expressionString;
++	char[] toProcess;
++	
++	// Length of input data
++	int max;
++
++	// Current lexing position in the input data
++	int pos;
++	
++	// Output stream of tokens
++	List<Token> tokens = new ArrayList<Token>();
++
++	public Tokenizer(String inputdata) {
++		this.expressionString = inputdata;
++		this.toProcess = (inputdata+"\0").toCharArray();
++		this.max = toProcess.length;
++		this.pos = 0;
++		process();
++	}
++
++	public void process() {
++		boolean justProcessedEquals = false;
++		while (pos<max) {
++			char ch = toProcess[pos];
++			
++			if (justProcessedEquals) {
++				if (!isWhitespace(ch) && !isQuote(ch)) {
++					// following an '=' we commence a variant of regular tokenization, here we consume
++					// everything up to the next pipe/whitespace
++					lexArgValueIdentifier();
++				}
++				justProcessedEquals=false;
++				continue;
++			}
++			
++			if (isAlphabetic(ch) || isDigit(ch) || ch=='_') {
++				lexIdentifier();
++			} else {
++				switch (ch) {
++				case '-':
++					if (!isTwoCharToken(TokenKind.DOUBLE_MINUS)) {
++						throw new InternalParseException(new DSLParseException(
++								expressionString, pos,
++								XDDSLMessages.MISSING_CHARACTER, "-"));
++					}
++					pushPairToken(TokenKind.DOUBLE_MINUS);
++					break;
++				case '=':
++					justProcessedEquals=true;
++					pushCharToken(TokenKind.EQUALS);
++					break;
++				case '|':
++					pushCharToken(TokenKind.PIPE);
++					break;
++				case ' ':
++				case '\t':
++				case '\r':
++					// drift over white space
++					pos++;
++					break;
++				case '\n':
++					pushCharToken(TokenKind.NEWLINE);
++					break;
++				case ';':
++					pushCharToken(TokenKind.SEMICOLON);
++					break;
++				case '\'':
++					lexQuotedStringLiteral();
++					break;
++				case '"':
++					lexDoubleQuotedStringLiteral();
++					break;
++				case '@':
++					pushCharToken(TokenKind.REFERENCE);
++					break;
++				case 0:
++					// hit sentinel at end of value
++					pos++; // will take us to the end
++					break;
++				case '\\':
++					throw new InternalParseException(new DSLParseException(expressionString,pos,XDDSLMessages.UNEXPECTED_ESCAPE_CHAR));
++				default:
++					throw new InternalParseException(new DSLParseException(expressionString,pos,XDDSLMessages.UNEXPECTED_DATA,ch));
++//					throw new IllegalStateException("Cannot handle ("+Integer.valueOf(ch)+") '"+ch+"'");
++				}
++			}
++		}
++	}
++
++	public List<Token> getTokens() {
++		return tokens;
++	}
++
++	// STRING_LITERAL: '\''! (APOS|~'\'')* '\''!;
++	private void lexQuotedStringLiteral() {
++		int start = pos;
++		boolean terminated = false;
++		while (!terminated) {
++			pos++;
++			char ch = toProcess[pos];
++			if (ch=='\'') {
++				// may not be the end if the char after is also a '
++				if (toProcess[pos+1]=='\'') {
++					pos++; // skip over that too, and continue
++				} else {
++					terminated = true;
++				}
++			}
++			if (ch==0) {
++				throw new InternalParseException(new DSLParseException(expressionString,start,XDDSLMessages.NON_TERMINATING_QUOTED_STRING));
++			}
++		}
++		pos++;
++		tokens.add(new Token(TokenKind.LITERAL_STRING, subarray(start,pos), start, pos));
++	}
++
++	// DQ_STRING_LITERAL:	'"'! (~'"')* '"'!;
++	private void lexDoubleQuotedStringLiteral() {
++		int start = pos;
++		boolean terminated = false;
++		while (!terminated) {
++			pos++;
++			char ch = toProcess[pos];
++			if (ch=='"') {
++				// may not be the end if the char after is also a "
++				if (toProcess[pos+1]=='"') {
++					pos++; // skip over that too, and continue
++				} else {
++					terminated = true;
++				}
++			}
++			if (ch==0) {
++				throw new InternalParseException(new DSLParseException(expressionString,start,XDDSLMessages.NON_TERMINATING_DOUBLE_QUOTED_STRING));
++			}
++		}
++		pos++;
++		tokens.add(new Token(TokenKind.LITERAL_STRING, subarray(start,pos), start, pos));
++	}
++
++	// if this is changed, it must remain sorted
++	private static final String[] alternativeOperatorNames = { "DIV","EQ","GE","GT","LE","LT","MOD","NE","NOT"};
++
++	private void lexIdentifier() {
++		int start = pos;
++		do {
++			pos++;
++		} while (isIdentifier(toProcess[pos]));
++		char[] subarray = subarray(start,pos);
++
++		// Check if this is the alternative (textual) representation of an operator (see alternativeOperatorNames)
++		if ((pos-start)==2 || (pos-start)==3) {
++			String asString = new String(subarray).toUpperCase();
++			int idx = Arrays.binarySearch(alternativeOperatorNames,asString);
++			if (idx>=0) {
++				pushOneCharOrTwoCharToken(TokenKind.valueOf(asString),start,subarray);
++				return;
++			}
++		}
++		tokens.add(new Token(TokenKind.IDENTIFIER,subarray,start,pos));
++	}
++	
++	private boolean isArgValueIdentifierTerminator(char ch) {
++		return ch=='|' || ch==';' || ch=='\0' || isWhitespace(ch);
++	}
++	
++	private void lexArgValueIdentifier() {
++		int start = pos;
++		do {
++			pos++;
++		} while (!isArgValueIdentifierTerminator(toProcess[pos]));
++		char[] subarray = subarray(start,pos);
++		tokens.add(new Token(TokenKind.IDENTIFIER,subarray,start,pos));
++	}
++
++	private char[] subarray(int start, int end) {
++		char[] result = new char[end - start];
++		System.arraycopy(toProcess, start, result, 0, end - start);
++		return result;
++	}
++
++	/**
++	 * Check if this might be a two character token.
++	 */
++	private boolean isTwoCharToken(TokenKind kind) {
++		Assert.isTrue(kind.tokenChars.length == 2);
++		Assert.isTrue(toProcess[pos] == kind.tokenChars[0]);
++		return toProcess[pos+1] == kind.tokenChars[1];
++	}
++
++	/**
++	 * Push a token of just one character in length.
++	 */
++	private void pushCharToken(TokenKind kind) {
++		tokens.add(new Token(kind,pos,pos+1));
++		pos++;
++	}
++
++	/**
++	 * Push a token of two characters in length.
++	 */
++	private void pushPairToken(TokenKind kind) {
++		tokens.add(new Token(kind,pos,pos+2));
++		pos+=2;
++	}
++
++	private void pushOneCharOrTwoCharToken(TokenKind kind, int pos, char[] data) {
++		tokens.add(new Token(kind,data,pos,pos+kind.getLength()));
++	}
++
++	//	ID:	('a'..'z'|'A'..'Z'|'_'|'$') ('a'..'z'|'A'..'Z'|'_'|'$'|'0'..'9'|DOT_ESCAPED|-)*;
++	private boolean isIdentifier(char ch) {
++		return isAlphabetic(ch) || isDigit(ch) || ch=='_' || ch=='$' || ch=='-';
++	}
++
++	private boolean isQuote(char ch) {
++		return ch=='\'' || ch=='"';
++	}
++	
++	private boolean isWhitespace(char ch) {
++		return ch==' ' || ch=='\t' || ch=='\r' || ch=='\n';
++	}
++	
++	private boolean isDigit(char ch) {
++		if (ch>255) {
++			return false;
++		}
++		return (flags[ch] & IS_DIGIT)!=0;
++	}
++
++	private boolean isAlphabetic(char ch) {
++		if (ch>255) {
++			return false;
++		}
++		return (flags[ch] & IS_ALPHA)!=0;
++	}
++
++	private static final byte flags[] = new byte[256];
++	private static final byte IS_DIGIT=0x01;
++	private static final byte IS_HEXDIGIT=0x02;
++	private static final byte IS_ALPHA=0x04;
++
++	static {
++		for (int ch='0';ch<='9';ch++) {
++			flags[ch]|=IS_DIGIT | IS_HEXDIGIT;
++		}
++		for (int ch='A';ch<='F';ch++) {
++			flags[ch]|= IS_HEXDIGIT;
++		}
++		for (int ch='a';ch<='f';ch++) {
++			flags[ch]|= IS_HEXDIGIT;
++		}
++		for (int ch='A';ch<='Z';ch++) {
++			flags[ch]|= IS_ALPHA;
++		}
++		for (int ch='a';ch<='z';ch++) {
++			flags[ch]|= IS_ALPHA;
++		}
++	}
++	
++	public String toString() {
++		StringBuilder s = new StringBuilder();
++		s.append(this.expressionString).append("\n");
++		for (int i=0;i<this.pos;i++) {
++			s.append(" ");
++		}
++		s.append("^\n");
++		s.append(tokens).append("\n");
++		return s.toString();
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/XDDSLMessages.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/XDDSLMessages.java
+new file mode 100644
+index 0000000..451bf1f
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/XDDSLMessages.java
+@@ -0,0 +1,102 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++import java.text.MessageFormat;
++
++/**
++ * Contains all the messages that can be produced during Spring XD DSL parsing. Each message has a kind (info,
++ * warn, error) and a code number. Tests can be written to expect particular code numbers rather than particular text,
++ * enabling the message text to more easily be modified and the tests to run successfully in different locales.
++ * <p>
++ * When a message is formatted, it will have this kind of form
++ *
++ * <pre class="code">
++ * XD105E: (pos 34): Expected an argument value but was ' '
++ * </pre>
++ *
++ * </code> The prefix captures the code and the error kind, whilst the position is included if it is known.
++ *
++ * @author Andy Clement
++ */
++public enum XDDSLMessages {
++
++	// TODO [Andy] need testcases for all these kinds of message
++	UNEXPECTED_DATA_AFTER_MODULE(Kind.ERROR,100,"Unexpected data after module definition: ''{0}''"),//
++	NO_WHITESPACE_BEFORE_ARG_NAME(Kind.ERROR,101,"No whitespace allowed between '--' and option name"),//
++	NO_WHITESPACE_BEFORE_ARG_EQUALS(Kind.ERROR,102,"No whitespace allowed after argument name and before '='"),//
++	NO_WHITESPACE_BEFORE_ARG_VALUE(Kind.ERROR,103,"No whitespace allowed after '=' and before option value"),//
++	MORE_INPUT(Kind.ERROR,104, "After parsing a valid stream, there is still more data: ''{0}''"),
++	EXPECTED_ARGUMENT_VALUE(Kind.ERROR,105,"Expected an argument value but was ''{0}''"),
++	NON_TERMINATING_DOUBLE_QUOTED_STRING(Kind.ERROR,106,"Cannot find terminating \" for string"),//
++	NON_TERMINATING_QUOTED_STRING(Kind.ERROR,107,"Cannot find terminating ' for string"), //
++	MISSING_CHARACTER(Kind.ERROR,108,"missing expected character ''{0}''"),
++	NOT_EXPECTED_TOKEN(Kind.ERROR,111,"Unexpected token.  Expected ''{0}'' but was ''{1}''"),
++	OOD(Kind.ERROR,112,"Unexpectedly ran out of input"), //
++	UNEXPECTED_ESCAPE_CHAR(Kind.ERROR,114,"unexpected escape character."), //
++	UNEXPECTED_DATA(Kind.ERROR,115,"unexpected data in stream configuration ''{0}''"), //
++	;
++	
++	private Kind kind;
++	private int code;
++	private String message;
++
++	private XDDSLMessages(Kind kind, int code, String message) {
++		this.kind = kind;
++		this.code = code;
++		this.message = message;
++	}
++
++	/**
++	 * Produce a complete message including the prefix, the position (if known) and with the inserts applied to the
++	 * message.
++	 *
++	 * @param pos the position, if less than zero it is ignored and not included in the message
++	 * @param inserts the inserts to put into the formatted message
++	 * @return a formatted message
++	 */
++	public String formatMessage(int pos, Object... inserts) {
++		StringBuilder formattedMessage = new StringBuilder();
++		formattedMessage.append("XD").append(code);
++//		switch (kind) {
++//		case WARNING:
++//			formattedMessage.append("W");
++//			break;
++//		case INFO:
++//			formattedMessage.append("I");
++//			break;
++//		case ERROR:
++		formattedMessage.append("E");
++//			break;
++//		}
++		formattedMessage.append(":");
++		if (pos != -1) {
++			formattedMessage.append("(pos ").append(pos).append("): ");
++		}
++		formattedMessage.append(MessageFormat.format(message, inserts));
++		return formattedMessage.toString();
++	}
++	
++	public Kind getKind() {
++		return kind;
++	}
++
++	public static enum Kind {
++		INFO, WARNING, ERROR
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ArgumentNode.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ArgumentNode.java
+new file mode 100644
+index 0000000..8b6bf13
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ArgumentNode.java
+@@ -0,0 +1,47 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.xd.dirt.stream.dsl.ast;
++
++/**
++ * @author Andy Clement
++ */
++public class ArgumentNode extends AstNode {
++
++	private String name;
++	private String value;
++
++	public ArgumentNode(String name, String value, int startpos, int endpos) {
++		super(startpos, endpos);
++		this.name = name;
++		this.value = value;
++	}
++	
++	public String getName() {
++		return name;
++	}
++	
++	public String getValue() {
++		return value;
++	}
++
++	@Override
++	public String stringify() {
++		StringBuilder s = new StringBuilder();
++		s.append("--").append(name).append("=").append(value);
++		return s.toString();
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/AstNode.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/AstNode.java
+new file mode 100644
+index 0000000..815024a
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/AstNode.java
+@@ -0,0 +1,45 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.xd.dirt.stream.dsl.ast;
++
++/**
++ * Common supertype for the ast nodes built during stream parsing.
++ * @author Andy Clement
++ */
++public abstract class AstNode {
++	
++	protected int startpos;
++	protected int endpos;
++
++	public AstNode(int startpos, int endpos) {
++		this.startpos = startpos;
++		this.endpos = endpos;
++	}
++	
++	public int getStartPos() {
++		return startpos;
++	}
++
++	public int getEndPos() {
++		return endpos;
++	}
++
++	/**
++	 * @return a string representation of the AST. Useful for debugging/testing.
++	 */
++	public abstract String stringify();
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ModuleNode.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ModuleNode.java
+new file mode 100644
+index 0000000..ba4390a
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/ModuleNode.java
+@@ -0,0 +1,78 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.xd.dirt.stream.dsl.ast;
++
++import java.util.Properties;
++
++/**
++ * @author Andy Clement
++ */
++public class ModuleNode extends AstNode {
++
++	private String moduleName;
++	private ArgumentNode[] arguments;
++	
++	public ModuleNode(String moduleName, int startpos, int endpos, ArgumentNode[] arguments) {
++		super(startpos,endpos);
++		this.moduleName = moduleName;
++		if (arguments != null) {
++			this.arguments = arguments;
++			// adjust end pos for module node to end of final argument
++			this.endpos = this.arguments[this.arguments.length-1].endpos;
++		}
++	}
++	
++	@Override
++	public String stringify() {
++		StringBuilder s = new StringBuilder();
++		s.append("(").append("ModuleNode:").append(moduleName);
++		if (arguments != null) {
++			for (int a=0;a<arguments.length;a++) {
++				s.append(" --").append(arguments[a].getName()).append("=").append(arguments[a].getValue());
++			}
++		}
++		s.append(":");
++		s.append(getStartPos()).append(">").append(getEndPos());
++		s.append(")");
++		return s.toString();
++	}
++
++	public String getName() {
++		return moduleName;
++	}
++
++	public ArgumentNode[] getArguments() {
++		return arguments;
++	}
++
++	public boolean hasArguments() {
++		return arguments!=null;
++	}
++
++	/**
++	 * @return Retrieve the module arguments as a simple {@link java.util.Properties} object.
++	 */
++	public Properties getArgumentsAsProperties() {
++		Properties props = new Properties();
++		if (arguments!=null) {
++			for (ArgumentNode argumentNode: arguments) {
++				props.put(argumentNode.getName(), argumentNode.getValue());
++			}
++		}
++		return props;
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamNode.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamNode.java
+new file mode 100644
+index 0000000..a837f2b
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamNode.java
+@@ -0,0 +1,74 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.xd.dirt.stream.dsl.ast;
++
++import java.util.List;
++
++/**
++ * @author Andy Clement
++ */
++public class StreamNode extends AstNode {
++	
++	private String streamName;
++	private List<ModuleNode> moduleNodes;
++
++	public StreamNode(String streamName, List<ModuleNode> moduleNodes) {
++		super(moduleNodes.get(0).getStartPos(),moduleNodes.get(moduleNodes.size()-1).getEndPos());
++		this.streamName = streamName;
++		this.moduleNodes = moduleNodes;
++	}
++	
++	/** @inheritDoc */
++	@Override
++	public String stringify() {
++		StringBuilder s = new StringBuilder();
++		s.append("[");
++		if (getStreamName()!=null) {
++			s.append(getStreamName()).append(" = ");
++		}
++		for (ModuleNode moduleNode: moduleNodes) {
++			s.append(moduleNode.stringify());
++		}
++		s.append("]");
++		return s.toString();
++	}
++
++	public List<ModuleNode> getModuleNodes() {
++		return moduleNodes;
++	}
++	
++	public String getStreamName() {
++		// TODO [Andy] if null, could compute it using the module2module2module... algorithm
++		return streamName;
++	}
++	
++	/** 
++	 * Find the first reference to the named module in the stream. If the same module is 
++	 * referred to multiple times the secondary references cannot
++	 * be accessed via this method.
++	 * 
++	 * @return the first occurrence of the named module in the stream
++	 */
++	public ModuleNode getModule(String moduleName) {
++		for (ModuleNode moduleNode: moduleNodes) {
++			if (moduleNode.getName().equals(moduleName)) {
++				return moduleNode;
++			}
++		}
++		return null;
++	}
++
++}
+diff --git a/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamsNode.java b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamsNode.java
+new file mode 100644
+index 0000000..2c47c5c
+--- /dev/null
++++ b/spring-xd-dirt/src/main/java/org/springframework/xd/dirt/stream/dsl/ast/StreamsNode.java
+@@ -0,0 +1,81 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.springframework.xd.dirt.stream.dsl.ast;
++
++import java.util.List;
++
++// TODO [Andy] not sure this ast node is necessary if we never parse multiple stream definitions in one go
++/**
++ * @author Andy Clement
++ */
++public class StreamsNode extends AstNode {
++	
++	private String streamsText;
++	private List<StreamNode> streamNodes;
++
++	public StreamsNode(String streamsText, List<StreamNode> streamNodes) {
++		super(streamNodes.get(0).getStartPos(),streamNodes.get(streamNodes.size()-1).getEndPos());
++		this.streamsText = streamsText;
++		this.streamNodes = streamNodes;
++	}
++	
++	@Override
++	public String stringify() {
++		StringBuilder s = new StringBuilder();
++		s.append("Streams[").append(streamsText).append("]");
++		if (streamNodes.size()>1) {
++			s.append("\n");
++		}
++		for (int str=0;str<streamNodes.size();str++) {
++			if (str>0) {
++				s.append("\n");
++			}			
++			s.append(streamNodes.get(str).stringify());
++		}
++		return s.toString();
++	}
++
++	public List<StreamNode> getStreamNodes() {
++		return streamNodes;
++	}
++	
++	public String getStreamsText() {
++		return streamsText;
++	}
++
++	public List<ModuleNode> getModules() {
++		return streamNodes.get(0).getModuleNodes();
++	}
++
++	public List<ModuleNode> getModuleNodes() {
++		return streamNodes.get(0).getModuleNodes();
++	}
++
++	public ModuleNode getModule(String moduleName) {
++		for (StreamNode streamNode: streamNodes) {
++			ModuleNode moduleNode = streamNode.getModule(moduleName);
++			if (moduleNode!=null) {
++				return moduleNode;
++			}
++		}
++		return null;
++	}
++
++	public List<StreamNode> getStreams() {
++		return streamNodes;
++	}
++
++}
+diff --git a/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/EnhancedStreamParserTests.java b/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/EnhancedStreamParserTests.java
+new file mode 100644
+index 0000000..4b40046
+--- /dev/null
++++ b/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/EnhancedStreamParserTests.java
+@@ -0,0 +1,79 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.fail;
++
++import java.util.List;
++import java.util.Map;
++import java.util.Properties;
++
++import org.junit.Test;
++
++import org.springframework.xd.dirt.module.ModuleDeploymentRequest;
++
++/**
++ * @author Mark Fisher
++ * @author David Turanski
++ */
++public class EnhancedStreamParserTests {
++
++	@Test
++	public void simpleStream() {
++		EnhancedStreamParser parser = new EnhancedStreamParser();
++		List<ModuleDeploymentRequest> requests = parser.parse("test", "foo | bar");
++		assertEquals(2, requests.size());
++		ModuleDeploymentRequest sink = requests.get(0);
++		ModuleDeploymentRequest source = requests.get(1);
++		assertEquals("foo", source.getModule());
++		assertEquals("test", source.getGroup());
++		assertEquals(0, source.getIndex());
++		assertEquals("source", source.getType());
++		assertEquals(0, source.getParameters().size());
++		assertEquals("bar", sink.getModule());
++		assertEquals("test", sink.getGroup());
++		assertEquals(1, sink.getIndex());
++		assertEquals("sink", sink.getType());
++		assertEquals(0, sink.getParameters().size());
++	}
++
++	@Test
++	public void parameterizedModules() {
++		EnhancedStreamParser parser = new EnhancedStreamParser();
++		List<ModuleDeploymentRequest> requests = parser.parse("test", "foo --x=1 --y=two | bar --z=3");
++		assertEquals(2, requests.size());
++		ModuleDeploymentRequest sink = requests.get(0);
++		ModuleDeploymentRequest source = requests.get(1);
++		assertEquals("foo", source.getModule());
++		assertEquals("test", source.getGroup());
++		assertEquals(0, source.getIndex());
++		assertEquals("source", source.getType());
++		Map<String, String> sourceParameters = source.getParameters();
++		assertEquals(2, sourceParameters.size());
++		assertEquals("1", sourceParameters.get("x"));
++		assertEquals("two", sourceParameters.get("y"));
++		assertEquals("bar", sink.getModule());
++		assertEquals("test", sink.getGroup());
++		assertEquals(1, sink.getIndex());
++		assertEquals("sink", sink.getType());
++		Map<String, String> sinkParameters = sink.getParameters();
++		assertEquals(1, sinkParameters.size());
++		assertEquals("3", sinkParameters.get("z"));
++	}
++
++}
+\ No newline at end of file
+diff --git a/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/ParserTests.java b/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/ParserTests.java
+new file mode 100644
+index 0000000..51adb1c
+--- /dev/null
++++ b/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/ParserTests.java
+@@ -0,0 +1,234 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++import java.util.List;
++import java.util.Properties;
++
++import org.junit.Test;
++import org.springframework.xd.dirt.stream.EnhancedStreamParser;
++import org.springframework.xd.dirt.stream.dsl.ast.ArgumentNode;
++import org.springframework.xd.dirt.stream.dsl.ast.ModuleNode;
++import org.springframework.xd.dirt.stream.dsl.ast.StreamNode;
++import org.springframework.xd.dirt.stream.dsl.ast.StreamsNode;
++
++import static org.junit.Assert.*;
++
++/**
++ * @author Andy Clement
++ */
++public class ParserTests {
++	
++	@Test
++	public void oneModule() {
++		StreamsNode ast = new StreamConfigParser().parse("foo");
++		assertEquals("Streams[foo][(ModuleNode:foo:0>3)]",ast.stringify());
++	}
++	
++	@Test
++	public void moduleAlias() {
++		StreamsNode ast = new StreamConfigParser().parse("mystream = foo");
++		assertEquals("Streams[mystream = foo][mystream = (ModuleNode:foo:11>14)]",ast.stringify());
++	}
++
++	@Test
++	public void twoModules() {
++		StreamsNode ast = new StreamConfigParser().parse("foo | bar");
++		assertEquals("Streams[foo | bar][(ModuleNode:foo:0>3)(ModuleNode:bar:6>9)]",ast.stringify());
++	}
++
++	@Test
++	public void oneModuleWithParam() {
++		StreamsNode ast = new StreamConfigParser().parse("foo --name=value");
++		assertEquals("Streams[foo --name=value][(ModuleNode:foo --name=value:0>16)]",ast.stringify());
++	}
++	
++	@Test
++	public void needAdjacentTokens() {
++		checkForParseError("foo -- name=value",XDDSLMessages.NO_WHITESPACE_BEFORE_ARG_NAME,7);
++		checkForParseError("foo --name =value",XDDSLMessages.NO_WHITESPACE_BEFORE_ARG_EQUALS,11);
++		checkForParseError("foo --name= value",XDDSLMessages.NO_WHITESPACE_BEFORE_ARG_VALUE,12);
++	}
++	
++	@Test
++	public void oneModuleWithTwoParams() {
++		StreamsNode ast = new StreamConfigParser().parse("foo --name=value --x=y");
++		assertTrue(ast instanceof StreamsNode);
++		StreamsNode sn = (StreamsNode)ast;
++		List<ModuleNode> moduleNodes = sn.getModuleNodes();
++		assertEquals(1,moduleNodes.size());
++		
++		ModuleNode mn = moduleNodes.get(0);
++		assertEquals("foo",mn.getName());
++		ArgumentNode[] args = mn.getArguments();
++		assertNotNull(args);
++		assertEquals(2,args.length);
++		assertEquals("name",args[0].getName());
++		assertEquals("value",args[0].getValue());
++		assertEquals("x",args[1].getName());
++		assertEquals("y",args[1].getValue());
++		
++		assertEquals("Streams[foo --name=value --x=y][(ModuleNode:foo --name=value --x=y:0>22)]",ast.stringify());
++	}
++	
++	@Test
++	public void testHorribleTap() {
++		String stream = "tap @twitter";
++		StreamConfigParser parser = new StreamConfigParser();
++		StreamsNode ast = parser.parse(stream);
++		assertEquals("Streams[tap @twitter][(ModuleNode:tap --channel=twitter.0:0>12)]",ast.stringify());
++	}
++	
++	@Test
++	public void testMultiline() {
++		String stream = "foo\nbar";
++		StreamConfigParser parser = new StreamConfigParser();
++		StreamsNode ast = parser.parse(stream);
++		List<StreamNode> streams = ast.getStreams();
++		assertEquals(2,streams.size());
++		System.out.println(ast.stringify());
++	}
++	
++	@Test
++	public void testMultiline2() {
++		String stream = "foo  ;  bar";
++		StreamConfigParser parser = new StreamConfigParser();
++		StreamsNode ast = parser.parse(stream);
++		List<StreamNode> streams = ast.getStreams();
++		assertEquals(2,streams.size());
++		System.out.println(ast.stringify());
++	}
++	
++	@Test
++	public void testParameters() {
++		String module = "gemfire-cq --query='Select * from /Stocks where symbol=''VMW''' --regionName=foo --foo=bar";
++		StreamConfigParser parser = new StreamConfigParser();
++		StreamsNode ast = parser.parse(module);
++		ModuleNode gemfireModule = ast.getModule("gemfire-cq");
++		Properties parameters = gemfireModule.getArgumentsAsProperties();
++		assertEquals(3, parameters.size());
++		assertEquals("Select * from /Stocks where symbol='VMW'", parameters.get("query"));
++		assertEquals("foo", parameters.get("regionName"));
++		assertEquals("bar", parameters.get("foo"));
++
++		module = "test";
++		parameters = parser.parse(module).getModule("test").getArgumentsAsProperties();
++		assertEquals(0, parameters.size());
++
++		module = "foo --x=1 --y=two ";
++		parameters = parser.parse(module).getModule("foo").getArgumentsAsProperties();
++		assertEquals(2, parameters.size());
++		assertEquals("1", parameters.get("x"));
++		assertEquals("two", parameters.get("y"));
++		
++		module = "foo --x=1a2b --y=two ";
++		parameters = parser.parse(module).getModule("foo").getArgumentsAsProperties();
++		assertEquals(2, parameters.size());
++		assertEquals("1a2b", parameters.get("x"));
++		assertEquals("two", parameters.get("y"));
++
++		module = "foo --x=2";
++		parameters = parser.parse(module).getModule("foo").getArgumentsAsProperties();
++		assertEquals(1, parameters.size());
++		assertEquals("2", parameters.get("x"));
++		
++		module = "--foo = bar";
++		try {
++			parser.parse(module);
++			fail(module + " is invalid. Should throw exception");
++		} catch (Exception e) {
++			// success
++		}
++	}
++
++	@Test
++	public void testInvalidModules() {
++		String config = "test | foo--x=13";
++		EnhancedStreamParser parser = new EnhancedStreamParser();
++		try {
++			parser.parse("t", config);
++			fail(config + " is invalid. Should throw exception");
++		} catch (Exception e) {
++			// success
++		}
++	}
++	
++	@Test
++	public void expressions_xd159() {
++		StreamsNode ast = new StreamConfigParser().parse("foo | transform --expression=--payload | bar");
++		ModuleNode mn = ast.getModule("transform");
++		Properties props = mn.getArgumentsAsProperties();
++		assertEquals("--payload",props.get("expression"));
++	}
++
++	@Test
++	public void expressions_xd159_2() {
++		// need quotes around an argument value with a space in it
++		checkForParseError("foo | transform --expression=new StringBuilder(payload).reverse() | bar",XDDSLMessages.UNEXPECTED_DATA,46);
++	}
++	
++	@Test
++	public void expressions_xd159_3() {
++		StreamsNode ast = new StreamConfigParser().parse("foo |  transform --expression='new StringBuilder(payload).reverse()' | bar");
++		ModuleNode mn = ast.getModule("transform");
++		Properties props = mn.getArgumentsAsProperties();
++		assertEquals("new StringBuilder(payload).reverse()",props.get("expression"));
++	}
++	
++	@Test
++	public void expressions_xd159_4() {
++		StreamsNode ast = new StreamConfigParser().parse("foo |  transform --expression=\"'Hello, world!'\" | bar");
++		ModuleNode mn = ast.getModule("transform");
++		Properties props = mn.getArgumentsAsProperties();
++		assertEquals("'Hello, world!'",props.get("expression"));
++		ast = new StreamConfigParser().parse("foo |  transform --expression='''Hello, world!''' | bar");
++		mn = ast.getModule("transform");
++		props = mn.getArgumentsAsProperties();
++		assertEquals("'Hello, world!'",props.get("expression"));
++		checkForParseError("foo |  transform --expression=''Hello, world!'' | bar",XDDSLMessages.UNEXPECTED_DATA,37);
++	}
++	
++	@Test
++	public void expressions_gh1() {
++		StreamsNode ast = new StreamConfigParser().parse("http --port=9014 | filter --expression=\"payload == 'foo'\" | log");
++		ModuleNode mn = ast.getModule("filter");
++		Properties props = mn.getArgumentsAsProperties();
++		assertEquals("payload == 'foo'",props.get("expression"));
++	}
++	
++	@Test
++	public void expressions_gh1_2() {
++		StreamsNode ast = new StreamConfigParser().parse("http --port=9014 | filter --expression='new Foo()' | log");
++		ModuleNode mn = ast.getModule("filter");
++		Properties props = mn.getArgumentsAsProperties();
++		assertEquals("new Foo()",props.get("expression"));
++	}
++	
++
++	// ---
++	
++	private void checkForParseError(String stream,XDDSLMessages msg,int pos) {
++		try {
++			new StreamConfigParser().parse(stream);
++			fail("expected to fail");
++		} catch (DSLParseException e) {
++//			e.printStackTrace();
++			assertEquals(msg,e.getMessageCode());
++			assertEquals(pos,e.getPosition());
++		}
++	}
++}
+\ No newline at end of file
+diff --git a/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/TokenizerTests.java b/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/TokenizerTests.java
+new file mode 100644
+index 0000000..8332e7f
+--- /dev/null
++++ b/spring-xd-dirt/src/test/java/org/springframework/xd/dirt/stream/dsl/TokenizerTests.java
+@@ -0,0 +1,157 @@
++/*
++ * Copyright 2013 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.springframework.xd.dirt.stream.dsl;
++
++import java.util.List;
++
++import org.junit.Test;
++import static org.junit.Assert.fail;
++
++/**
++ * @author Andy Clement
++ */
++public class TokenizerTests {
++
++	@Test
++	public void oneModule() {
++		Tokenizer t = new Tokenizer("foo");
++		checkTokens(t,token_identifier("foo",0,3));
++	}
++	
++	@Test
++	public void moduleAliasing() {
++		Tokenizer t = new Tokenizer("mystream = foo");
++		checkTokens(t,token_identifier("mystream",0,8),token(TokenKind.EQUALS,9,10),token_identifier("foo",11,14));
++	}
++	
++	@Test
++	public void moduleAliasingWithOptions() {
++		Tokenizer t = new Tokenizer("myhttp = http --port=9090");
++		checkTokens(t,token_identifier("myhttp",0,6),token(TokenKind.EQUALS,7,8),token_identifier("http",9,13),
++				token(TokenKind.DOUBLE_MINUS,14,16),token_identifier("port",16,20),token(TokenKind.EQUALS,20,21),token_identifier("9090",21,25));
++	}
++	
++	@Test
++	public void twoModules() {
++		Tokenizer t = new Tokenizer("foo | bar");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.PIPE,4,5),token_identifier("bar",6,9));
++	}
++	
++	@Test
++	public void threeModules() {
++		Tokenizer t = new Tokenizer("foo | bar | goo");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.PIPE,4,5),token_identifier("bar",6,9),token(TokenKind.PIPE,10,11),token_identifier("goo",12,15));
++	}
++
++	@Test
++	public void oneModuleWithParam() {
++		Tokenizer t = new Tokenizer("foo --name=value");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),token(TokenKind.EQUALS,10,11),token_identifier("value",11,16));
++	}
++
++	@Test
++	public void oneModuleWithTwoParam() {
++		Tokenizer t = new Tokenizer("foo --name=value --xx=yy");
++		checkTokens(t,token_identifier("foo",0,3),
++				token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),token(TokenKind.EQUALS,10,11),token_identifier("value",11,16),
++				token(TokenKind.DOUBLE_MINUS,17,19),token_identifier("xx",19,21),token(TokenKind.EQUALS,21,22),token_identifier("yy",22,24));
++	}
++
++	@Test
++	public void messyArgumentValues() {
++		Tokenizer t = new Tokenizer("foo --name=4:5abcdef --xx=(aaa)bbc%32");
++		checkTokens(t,token_identifier("foo",0,3),
++				token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),token(TokenKind.EQUALS,10,11),token_identifier("4:5abcdef",11,20),
++				token(TokenKind.DOUBLE_MINUS,21,23),token_identifier("xx",23,25),token(TokenKind.EQUALS,25,26),token_identifier("(aaa)bbc%32",26,37));
++	}
++	
++	@Test
++	public void newlines() {
++		Tokenizer t = new Tokenizer("foo\nbar");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.NEWLINE,3,4),token_identifier("bar",4,7));
++	}
++	
++	@Test
++	public void semicolons() {
++		Tokenizer t = new Tokenizer("foo;bar");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.SEMICOLON,3,4),token_identifier("bar",4,7));
++	}
++	
++	@Test
++	public void oneModuleWithSpacedValues() {
++		Tokenizer t = new Tokenizer("foo --name='i am a foo'");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),
++				token(TokenKind.EQUALS,10,11),token(TokenKind.LITERAL_STRING,"'i am a foo'",11,23));
++		
++		t = new Tokenizer("foo --name='i have a ''string'' inside'");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),
++				token(TokenKind.EQUALS,10,11),token(TokenKind.LITERAL_STRING,"'i have a ''string'' inside'",11,39));
++		
++		t = new Tokenizer("foo --name=\"i have a 'string' inside\"");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),
++				token(TokenKind.EQUALS,10,11),token(TokenKind.LITERAL_STRING,"\"i have a 'string' inside\"",11,37));
++		
++		t = new Tokenizer("foo --name='i have a \"string\" inside'");
++		checkTokens(t,token_identifier("foo",0,3),token(TokenKind.DOUBLE_MINUS,4,6),token_identifier("name",6,10),
++				token(TokenKind.EQUALS,10,11),token(TokenKind.LITERAL_STRING,"'i have a \"string\" inside'",11,37));
++	}
++	
++	// ---
++	
++	private void checkTokens(Tokenizer tokenizer, Token... expectedTokens) {
++		List<Token> tokens = tokenizer.getTokens();
++		if (tokens.size() != expectedTokens.length) {
++			fail("Expected stream\n"+stringify(expectedTokens)+"\n but found\n"+stringify(tokens));
++		}
++		for (int t=0;t<expectedTokens.length;t++) {
++			if (!expectedTokens[t].equals(tokens.get(t))) {
++				fail("Token #"+t+" is not as expected. Expected "+expectedTokens[t]+" but was "+tokens.get(t));
++			}
++		}
++	}
++
++	private Token token(TokenKind tokenkind, String data, int start, int end) {
++		return new Token(tokenkind, data.toCharArray(), start, end);
++	}
++	
++	private Token token(TokenKind tokenkind, int start, int end) {
++		return new Token(tokenkind, start, end);
++	}
++	
++	private Token token_identifier(String identifier, int start, int end) {
++		return new Token(TokenKind.IDENTIFIER, identifier.toCharArray(), start, end);
++	}
++	
++	private String stringify(Token[] tokens) {
++		StringBuilder s = new StringBuilder();
++		if (tokens == null) {
++			s.append("null");
++		} else {
++			s.append("#").append(tokens.length).append(" ");
++			for (Token token: tokens) {
++				s.append(token).append(" ");
++			}
++		}
++		return s.toString().trim();		
++	}
++
++	private String stringify(List<Token> tokens) {
++		if (tokens == null) return null;
++		return stringify((Token[]) tokens.toArray(new Token[tokens.size()]));
++	}
++
++}
+\ No newline at end of file
+-- 
+1.7.11.2
+
